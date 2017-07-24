@@ -132,12 +132,17 @@ func (su *supervisor) Watch(ctx context.Context, factory Factory, restartLimit i
 					err := <-done
 					events <- WatchEventStopped{RunnableInfo: info, Error: err}
 					break LOOP
+				case <-su.global.Done():
+					err := <-done
+					events <- WatchEventStopped{RunnableInfo: info, Error: err}
+					break LOOP
 				}
-
 			}
 			select {
 			case <-time.After(restartDelay):
 			case <-ctx.Done():
+				break LOOP
+			case <-su.global.Done():
 				break LOOP
 			}
 			restartLimit--

@@ -24,42 +24,50 @@ type consul struct {
 	TTL                       time.Duration
 	Log                       *log.Logger
 	Client                    *api.Client
-	matched                   []string
+	matched                   map[string]struct{}
 	lock                      sync.Mutex
 	stop                      chan struct{}
 }
 
 func (c *consul) Spawned(runnable container.Runnable, id container.ID) {
-	_, exists := c.RegisterLabels[runnable.Label()]
+	info, exists := c.RegisterLabels[runnable.Label()]
 	if !exists {
 		return
 	}
+	dereg := c.AutoDeregistrationTimeout
+	if dereg < c.TTL {
+		dereg = 2 * c.TTL
+	}
+	if dereg < 1*time.Minute {
+		dereg = 1 * time.Minute
+	}
 	err := c.Client.Agent().ServiceRegister(&api.AgentServiceRegistration{
-		ID:   string(id),
 		Name: runnable.Label(),
 		Tags: []string{fmt.Sprintf("%v", os.Getpid())},
 		Check: &api.AgentServiceCheck{
-			DeregisterCriticalServiceAfter: c.AutoDeregistrationTimeout.String(),
+			DeregisterCriticalServiceAfter: dereg.String(),
 		},
 	})
 	if err != nil {
 		c.Log.Println("Can't register service", id, "in Consul:", err)
 	} else {
+		checkID := runnable.Label() + ":ttl"
 		reg := api.AgentCheckRegistration{}
-		reg.Name = string(id) + ":ttl"
-		reg.ID = string(id)
+		reg.Name = checkID
 		reg.TTL = c.TTL.String()
-		if c.AutoDeregistrationTimeout != 0 {
-			reg.DeregisterCriticalServiceAfter = c.AutoDeregistrationTimeout.String()
-		}
 		reg.ServiceID = runnable.Label()
+
+		if !info.Permanent {
+			reg.DeregisterCriticalServiceAfter = dereg.String()
+		}
+
 		err = c.Client.Agent().CheckRegister(&reg)
 		if err != nil {
 			c.Log.Println("Can't register service TTL check", id, "in Consul:", err)
 		} else {
 			c.Log.Println("Service", runnable.Label(), "registered in Consul")
 			c.lock.Lock()
-			c.matched = append(c.matched, string(id))
+			c.matched[checkID] = struct{}{}
 			c.lock.Unlock()
 		}
 	}
@@ -78,13 +86,10 @@ LOOP:
 }
 
 func (c *consul) updateChecks() {
-	var clone []string
 	c.lock.Lock()
-	clone = append(clone, c.matched...)
-	c.lock.Unlock()
 	wg := sync.WaitGroup{}
-	wg.Add(len(clone))
-	for _, id := range clone {
+	wg.Add(len(c.matched))
+	for id, _ := range c.matched {
 		go func(id string) {
 			defer wg.Done()
 			err := c.Client.Agent().UpdateTTL(id, "application running", "pass")
@@ -93,6 +98,7 @@ func (c *consul) updateChecks() {
 			}
 		}(id)
 	}
+	c.lock.Unlock()
 	wg.Wait()
 }
 
@@ -106,14 +112,12 @@ func (c *consul) Stopped(runnable container.Runnable, id container.ID, err error
 	if !exists {
 		return
 	}
-	err = c.Client.Agent().CheckDeregister(string(id))
-	if err != nil {
-		c.Log.Println("Can't deregister service TTL check", id, "in Consul:", err)
-	} else {
-		c.Log.Println("Check", id, "deregistered in Consul")
-	}
+	c.lock.Lock()
+	delete(c.matched, string(id))
+	c.lock.Unlock()
+
 	if !info.Permanent {
-		err = c.Client.Agent().ServiceDeregister(string(id))
+		err = c.Client.Agent().ServiceDeregister(runnable.Label())
 		if err != nil {
 			c.Log.Println("Can't deregister service", runnable.Label(), "in Consul:", err)
 		} else {
@@ -144,6 +148,7 @@ func NewConsul(client *api.Client, TTL time.Duration, deReg time.Duration, logge
 		Log:                       logger,
 		Client:                    client,
 		stop:                      make(chan struct{}, 1),
+		matched:                   make(map[string]struct{}),
 	}
 	go cons.checkLoop()
 	return cons

@@ -114,6 +114,10 @@ func (su *supervisor) Watch(ctx context.Context, factory Factory, restartLimit i
 			if err == nil {
 
 				id, done, stop := su.Spawn(run)
+				if stop == nil {
+					// supervisor closed
+					break LOOP
+				}
 				info := RunnableInfo{Instance: run, ID: id}
 				events <- WatchEventStarted(info)
 

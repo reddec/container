@@ -113,7 +113,7 @@ func (c *consul) Stopped(runnable container.Runnable, id container.ID, err error
 		return
 	}
 	c.lock.Lock()
-	delete(c.matched, string(id))
+	delete(c.matched, runnable.Label()+":ttl")
 	c.lock.Unlock()
 
 	if !info.Permanent {
